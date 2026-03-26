@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>FORSAKEN - DUAL RED KILLERS</title>
+    <style>
+        body { margin: 0; background: #111; overflow: hidden; touch-action: none; font-family: 'Courier New', monospace; }
+        canvas { display: block; }
+        #shield { position: absolute; inset: 0; z-index: 1000; touch-action: none; }
+        
+        #status-hud { position: absolute; top: 60px; left: 15px; pointer-events: none; }
+        .survivor-card { 
+            background: rgba(0,0,0,0.8); border-left: 4px solid #00ff00; 
+            padding: 5px 10px; margin-bottom: 4px; width: 180px; color: #fff; font-size: 10px;
+        }
+        .survivor-card.chased { border-left-color: #ff0000; animation: pulse 0.8s infinite; }
+        .hp-text { float: right; color: #00ff00; font-weight: bold; }
+
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
+        #stamina-bar { position: absolute; bottom: 20px; left: 20px; width: 180px; height: 10px; background: #222; border: 1px solid #444; }
+        #stamina-fill { width: 100%; height: 100%; background: #fff; transition: width 0.1s; }
+
+        #sprint-btn { 
+            position: absolute; bottom: 30px; right: 30px; 
+            width: 80px; height: 80px; border-radius: 50%; 
+            background: rgba(40,40,40,0.9); border: 2px solid #fff; 
+            color: #fff; font-size: 12px; font-weight: bold;
+            display: flex; align-items: center; justify-content: center;
+            z-index: 2000; cursor: pointer;
+        }
+        #sprint-btn.active { background: #ff0000; border-color: #ff0000; }
+        #timer { position: absolute; top: 15px; width: 100%; text-align: center; color: #fff; font-size: 22px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div id="timer">05:00</div>
+    <div id="status-hud"></div>
+    <div id="stamina-bar"><div id="stamina-fill"></div></div>
+    <div id="sprint-btn" onclick="toggleSprint()">SPRINT<br>OFF</div>
+    <div id="shield"></div>
+
+    <script type="importmap"> { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } } </script>
+<script type="module">
+import * as THREE from 'three';
+
+let scene, camera, renderer, player, clock = new THREE.Clock();
+let move = { x: 0, z: 0 }, yaw = 0, pitch = 0;
+let timeLeft = 300, isPlayerKiller = false, gameEnded = false;
+let stamina = 100, sprintOn = false;
+let touches = {}, survivors = [], obstacles = [], killers = [];
+
+window.toggleSprint = () => {
+    if(stamina > 10) {
+        sprintOn = !sprintOn;
+        const b = document.getElementById('sprint-btn');
+        b.classList.toggle('active', sprintOn);
+        b.innerHTML = sprintOn ? "SPRINT<br>ON" : "SPRINT<br>OFF";
+    }
+};
+
+function updateHUD() {
+    const container = document.getElementById('status-hud');
+    container.innerHTML = '';
+    survivors.forEach(s => {
+        if(!s.userData.isAlive) return;
+        const card = document.createElement('div');
+        card.className = 'survivor-card' + (s.userData.isChased ? ' chased' : '');
+        card.innerHTML = `${s.userData.name.toUpperCase()} <span class="hp-text">${Math.ceil(s.userData.hp)}%</span><br>` + 
+                         `<small>${s.userData.isChased ? 'DANGER' : 'SAFE'}</small>`;
+        container.appendChild(card);
+    });
+}
+
+function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111111);
+    scene.fog = new THREE.FogExp2(0x111111, 0.02);
+
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(1000, 1000), new THREE.MeshStandardMaterial({color: 0x1a1a1a}));
+    floor.rotation.x = -Math.PI/2; scene.add(floor);
+
+    // Complex Halls
+    for(let i=0; i<50; i++) {
+        const h = Math.random()*20+5;
+        const box = new THREE.Mesh(new THREE.BoxGeometry(20, h, 2), new THREE.MeshStandardMaterial({color: 0x333333}));
+        box.position.set(Math.random()*400-200, h/2, Math.random()*400-200);
+        scene.add(box);
+        obstacles.push(box);
+    }
+
+    player = new THREE.Group();
+    player.add(new THREE.Mesh(new THREE.BoxGeometry(2,4,1), new THREE.MeshStandardMaterial({color: 0xffffff})));
+    player.position.y = 2; scene.add(player);
+
+    const names = ["Shedletsky", "Elliot", "Guest 1337", "Noob", "Guest 0", "Builder", "Citizen", "Scout", "Medic", "Pilot"];
+    names.forEach(n => {
+        let s = new THREE.Group();
+        s.add(new THREE.Mesh(new THREE.BoxGeometry(2,4,1), new THREE.MeshStandardMaterial({color: 0x777777})));
+        s.position.set(Math.random()*200-100, 2, Math.random()*200-100);
+        s.userData = { name: n, hp: 100, isAlive: true, isChased: false, target: new THREE.Vector3(Math.random()*200-100, 2, Math.random()*200-100) };
+        scene.add(s);
+        survivors.push(s);
+    });
+
+    const sh = document.getElementById('shield');
+    sh.addEventListener('touchstart', e => {
+        for(let t of e.changedTouches) touches[t.identifier] = { x: t.clientX, y: t.clientY, move: t.clientX < window.innerWidth/2 };
+    });
+    sh.addEventListener('touchmove', e => {
+        e.preventDefault();
+        for(let t of e.changedTouches) {
+            let d = touches[t.identifier]; if(!d) continue;
+            if(d.move) { move.x = (t.clientX - 100)/50; move.z = (t.clientY - (window.innerHeight-100))/50; }
+            else { yaw -= (t.clientX - d.x)*0.005; pitch = Math.max(-0.8, Math.min(0.8, pitch + (t.clientY - d.y)*0.005)); d.x=t.clientX; d.y=t.clientY; }
+        }
+    });
+    sh.addEventListener('touchend', e => { for(let t of e.changedTouches) delete touches[t.identifier]; move={x:0,z:0}; });
+
+    loop();
+}
+
+function loop() {
+    requestAnimationFrame(loop);
+    let dt = clock.getDelta();
+
+    if(timeLeft > 0) {
+        timeLeft -= dt;
+        let m = Math.floor(timeLeft/60), s = Math.floor(timeLeft%60);
+        document.getElementById('timer').innerText = `${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+    } else if(!gameEnded) {
+        gameEnded = true;
+        let p = [...survivors, player];
+        for(let i=0; i<2; i++) {
+            let k = p.splice(Math.floor(Math.random()*p.length), 1)[0];
+            if(k === player) { isPlayerKiller = true; player.children[0].material.color.set(0xff0000); }
+            else { killers.push(k); k.children[0].material.color.set(0xff0000); }
+        }
+    }
+
+    // Stamina 
+    if(sprintOn && (move.x !== 0 || move.z !== 0)) {
+        stamina = Math.max(0, stamina - 20 * dt);
+        if(stamina === 0) { sprintOn = false; window.toggleSprint(); }
+    } else {
+        stamina = Math.min(100, stamina + 15 * dt);
+    }
+    document.getElementById('stamina-fill').style.width = stamina + "%";
+
+    // Player Movement
+    let speed = (isPlayerKiller ? 15 : 22) * (sprintOn ? 2.2 : 1.0);
+    player.position.addScaledVector(new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)), -move.z * speed * dt);
+    player.position.addScaledVector(new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw)), move.x * speed * dt);
+    player.rotation.y = yaw;
+
+    // AI Logic
+    survivors.forEach(s => {
+        if(!s.userData.isAlive || killers.includes(s)) return;
+        let nearestKiller = isPlayerKiller ? player : killers[0];
+        let d = nearestKiller ? s.position.distanceTo(nearestKiller.position) : 100;
+        s.userData.isChased = d < 45;
+
+        if(s.userData.isChased) {
+            let run = new THREE.Vector3().subVectors(s.position, nearestKiller.position).normalize();
+            s.position.addScaledVector(run, 25 * dt);
+            s.lookAt(s.position.x + run.x, 2, s.position.z + run.z);
+            if(d < 6) s.userData.hp -= 30 * dt;
+            if(s.userData.hp <= 0) { s.userData.isAlive = false; s.visible = false; }
+        } else {
+            // Wander
+            if(s.position.distanceTo(s.userData.target) < 5) s.userData.target.set(Math.random()*400-200, 2, Math.random()*400-200);
+            s.position.addScaledVector(new THREE.Vector3().subVectors(s.userData.target, s.position).normalize(), 14 * dt);
+            s.lookAt(s.userData.target.x, 2, s.userData.target.z);
+        }
+    });
+
+    if(frameCount++ % 15 === 0) updateHUD();
+
+    camera.position.set(player.position.x + Math.sin(yaw)*Math.cos(pitch)*20, player.position.y + Math.sin(pitch)*20 + 10, player.position.z + Math.cos(yaw)*Math.cos(pitch)*20);
+    camera.lookAt(player.position.x, player.position.y + 4, player.position.z);
+    renderer.render(scene, camera);
+}
+let frameCount = 0;
+init();
+</script>
+</body>
+</html>
